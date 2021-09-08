@@ -27,7 +27,7 @@ int SelvaArgParser_IntOpt(ssize_t *value, const char *name, const RedisModuleStr
 int SelvaArgParser_StrOpt(const char **value, const char *name, const RedisModuleString *arg_key, const RedisModuleString *arg_val) {
     TO_STR(arg_key, arg_val);
 
-    if(strcmp(name, arg_key_str)) {
+    if (strcmp(name, arg_key_str)) {
         return SELVA_ENOENT;
     }
 
@@ -318,4 +318,30 @@ int SelvaArgParser_MarkerId(Selva_SubscriptionMarkerId *marker_id, const RedisMo
 
     *marker_id = (Selva_SubscriptionMarkerId)ll;
     return 0;
+}
+
+int SelvaArgParser_IndexHints(RedisModuleStringList *out, RedisModuleString **argv, int argc) {
+    RedisModuleString **list = NULL;
+    int n = 0;
+
+    for (int i = 0; i < argc; i += 2) {
+        RedisModuleString **new_list;
+
+        if (i + 1 >= argc || strcmp("index", RedisModule_StringPtrLen(argv[i], NULL))) {
+            break;
+        }
+
+        const size_t list_size = ++n * sizeof(RedisModuleString *);
+        new_list = RedisModule_Realloc(list, list_size);
+        if (!new_list) {
+            RedisModule_Free(list);
+            return SELVA_ENOMEM;
+        }
+
+        list = new_list;
+        list[n - 1] = argv[i + 1];
+    }
+
+    *out = list;
+    return n;
 }

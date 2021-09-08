@@ -70,5 +70,14 @@ int SelvaArgParser_SubscriptionId(
 int SelvaArgParser_MarkerId(
         Selva_SubscriptionMarkerId *marker_id,
         const struct RedisModuleString *arg);
+/**
+ * Parse index hints from Redis command args.
+ * Parses index hints from argv until the first keyword mismatch.
+ * @returns The number of index hints found.
+ */
+int SelvaArgParser_IndexHints(
+        RedisModuleStringList *out,
+        struct RedisModuleString **argv,
+        int argc);
 
 #endif /* SELVA_ARG_PARSER */
