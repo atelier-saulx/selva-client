@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 #include "redismodule.h"
+#include "auto_free.h"
 #include "arg_parser.h"
 #include "errors.h"
 #include "hierarchy.h"
@@ -1308,6 +1309,8 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
     struct rpn_expression *traversal_expression = NULL;
     struct rpn_ctx *rpn_ctx = NULL;
     struct rpn_expression *filter_expression = NULL;
+    __auto_free RedisModuleString **index_hints = NULL;
+    int nr_index_hints = 0;
 
     /*
      * Open the Redis key.
@@ -1365,10 +1368,12 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
     /*
      * Parse the indexing hint.
      */
-    RedisModuleString *index_hint = NULL;
-    if (argc > ARGV_INDEX_VAL && !SelvaArgParser_StrOpt(NULL, "index", argv[ARGV_INDEX_TXT], argv[ARGV_INDEX_VAL])) {
-        index_hint = argv[ARGV_INDEX_VAL];
-        SHIFT_ARGS(2);
+    nr_index_hints = SelvaArgParser_IndexHints(&index_hints, argv + ARGV_INDEX_TXT, argc - ARGV_INDEX_TXT);
+    if (nr_index_hints < 0) {
+        replyWithSelvaError(ctx, SELVA_ENOMEM);
+        goto out;
+    } else if (nr_index_hints > 0) {
+        SHIFT_ARGS(2 * nr_index_hints);
     }
 
     /*
@@ -1532,8 +1537,8 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
      * we can use indexing because the final result is sorted and limited after
      * the node filtering.
      */
-    if (index_hint && limit != -1 && order == HIERARCHY_RESULT_ORDER_NONE) {
-        index_hint = NULL;
+    if (nr_index_hints > 0 && limit != -1 && order == HIERARCHY_RESULT_ORDER_NONE) {
+        nr_index_hints = 0;
     }
 
     /*
@@ -1543,8 +1548,12 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
     size_t merge_nr_fields = 0;
     for (size_t i = 0; i < ids_len; i += SELVA_NODE_ID_SIZE) {
         Selva_NodeId nodeId;
-        struct SelvaFindIndexControlBlock *icb = NULL;
-        struct SelvaSet *ind_out = NULL;
+        /*
+         * TODO Limit max nr_index_hints
+         */
+        struct SelvaFindIndexControlBlock *ind_icb[nr_index_hints];
+        struct SelvaSet *ind_out[nr_index_hints];
+        int ind_select = -1; /* Selected index. The smallest of all found. */
 
         Selva_NodeIdCpy(nodeId, ids_str + i);
 
@@ -1552,7 +1561,10 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
             continue;
         }
 
-        if (index_hint && selva_glob_config.find_lfu_count_init > 0) {
+        memset(ind_icb, 0, nr_index_hints * sizeof(struct SelvaFindIndexControlBlock *));
+        memset(ind_out, 0, nr_index_hints * sizeof(struct SelvaSet *));
+
+        if (nr_index_hints > 0 && selva_glob_config.find_lfu_count_init > 0) {
             RedisModuleString *dir_expr = NULL;
             int ind_err;
 
@@ -1562,11 +1574,23 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
                 dir_expr = argv[ARGV_REF_FIELD];
             }
 
-            ind_err = SelvaFind_AutoIndex(ctx, hierarchy, dir, dir_expr, nodeId, index_hint, &icb, &ind_out);
-            if (ind_err && ind_err != SELVA_ENOENT) {
-                fprintf(stderr, "%s:%d: AutoIndex returned an error: %s\n",
-                        __FILE__, __LINE__,
-                        getSelvaErrorStr(ind_err));
+            for (int i = 0; i < nr_index_hints; i++) {
+                struct SelvaFindIndexControlBlock *icb;
+                struct SelvaSet *set;
+
+                ind_err = SelvaFind_AutoIndex(ctx, hierarchy, dir, dir_expr, nodeId, index_hints[i], &icb, &set);
+                if (!ind_err) {
+                    ind_icb[i] = icb;
+                    ind_out[i] = set;
+
+                    if (ind_select < 0 || SelvaSet_Size(set) < SelvaSet_Size(ind_out[ind_select])) {
+                        ind_select = i; /* Select the smallest index res set for fastest lookup. */
+                    }
+                } else if (ind_err && ind_err != SELVA_ENOENT) {
+                    fprintf(stderr, "%s:%d: AutoIndex returned an error: %s\n",
+                            __FILE__, __LINE__,
+                            getSelvaErrorStr(ind_err));
+                }
             }
         }
 
@@ -1574,7 +1598,7 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
          * Run BFS/DFS.
          */
         ssize_t tmp_limit = -1;
-        const size_t skip = ind_out ? 0 : SelvaTraversal_GetSkip(dir); /* Skip n nodes from the results. */
+        const size_t skip = ind_select >= 0 ? 0 : SelvaTraversal_GetSkip(dir); /* Skip n nodes from the results. */
         struct FindCommand_Args args = {
             .ctx = ctx,
             .lang = lang,
@@ -1603,19 +1627,19 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
             break;
         }
 
-        if (ind_out) {
+        if (ind_select >= 0) {
             struct SelvaSetElement *el;
 
             /*
              * There is no need to run the filter again if the indexing was
              * executing the same filter already.
              */
-            if (argv_filter_expr && !RedisModule_StringCompare(argv_filter_expr, index_hint)) {
+            if (argv_filter_expr && !RedisModule_StringCompare(argv_filter_expr, index_hints[i])) {
                 args.rpn_ctx = NULL;
                 args.filter = NULL;
             }
 
-            SELVA_SET_NODEID_FOREACH(el, ind_out) {
+            SELVA_SET_NODEID_FOREACH(el, ind_out[ind_select]) {
                 struct SelvaModify_HierarchyNode *node;
 
                 node = SelvaHierarchy_FindNode(hierarchy, el->value_nodeId);
@@ -1650,8 +1674,19 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
         } else {
             err = SelvaModify_TraverseHierarchy(hierarchy, nodeId, dir, &cb);
         }
-        if (index_hint && icb) {
-            SelvaFind_Acc(icb, args.acc_take, args.acc_tot);
+        for (int i = 0; i < nr_index_hints; i++) {
+            struct SelvaFindIndexControlBlock *icb = ind_icb[i];
+
+            if (!icb) {
+                continue;
+            }
+
+            if (i == ind_select) {
+                SelvaFind_Acc(icb, args.acc_take, args.acc_tot);
+            } else {
+                /* Nothing taken from this index. */
+                SelvaFind_Acc(icb, 0, args.acc_tot);
+            }
         }
         if (err != 0) {
             /*
