@@ -555,18 +555,6 @@ static struct SelvaFindIndexControlBlock *upsert_index_cb(
 
         /* Finally create a timer. */
         create_index_cb_timer(ctx, icb);
-    } else {
-        typeof(icb->lfu_count) orig_lfu_count = icb->lfu_count;
-
-        /* Never increment if it's negative. */
-        if (orig_lfu_count >= 0) {
-            icb->lfu_count += selva_glob_config.find_lfu_count_incr;
-
-            /* Handle overflow. */
-            if (icb->lfu_count < orig_lfu_count) {
-                icb->lfu_count = selva_glob_config.find_lfu_count_init;
-            }
-        }
     }
 
     return icb;
@@ -590,6 +578,8 @@ int SelvaFind_AutoIndex(
     struct SelvaFindIndexControlBlock *icb;
     TO_STR(filter);
     filter_str;
+
+    *icb_out = NULL;
 
     if (!filter || filter_len == 0 || FIND_INDICES_MAX == 0) {
         return SELVA_EINVAL;
@@ -621,6 +611,7 @@ int SelvaFind_AutoIndex(
 
     icb = upsert_index_cb(ctx, hierarchy, node_id, dir, dir_expression, filter);
     *icb_out = icb;
+
     if (!icb || !icb->is_valid) {
         return SELVA_ENOENT;
     }
@@ -629,12 +620,37 @@ int SelvaFind_AutoIndex(
     return 0;
 }
 
+static void update_lfu_count(struct SelvaFindIndexControlBlock * restrict icb, size_t acc_take) {
+    typeof(icb->lfu_count) orig_lfu_count = icb->lfu_count;
+
+    /* Never increment if it's negative. */
+    if (orig_lfu_count >= 0) {
+        /*
+         * Give double increment for the index that was used.
+         * TODO This is not accurate because the find command could have
+         * actually returned an empty set, in which case the index result set
+         * was still actually useful.
+         */
+        icb->lfu_count += selva_glob_config.find_lfu_count_incr << !!acc_take;
+
+        /* Handle overflow. */
+        if (icb->lfu_count < orig_lfu_count) {
+            icb->lfu_count = selva_glob_config.find_lfu_count_init;
+        }
+    }
+}
+
 void SelvaFind_Acc(struct SelvaFindIndexControlBlock * restrict icb, size_t acc_take, size_t acc_tot) {
     if (!FIND_INDICES_MAX) {
         /* If indexing is disabled then the rest of the function will be optimized out. */
         return;
     }
 
+    update_lfu_count(icb, acc_take);
+
+    /*
+     * Result set size accounting.
+     */
     if (icb->is_valid) {
         if (acc_take > icb->find_acc.ind_take_max) {
             icb->find_acc.ind_take_max = acc_take;
