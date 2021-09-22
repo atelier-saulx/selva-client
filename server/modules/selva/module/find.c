@@ -1576,8 +1576,8 @@ static int SelvaHierarchy_FindCommand(RedisModuleCtx *ctx, RedisModuleString **a
 
             /* Select the best index res set. */
             for (int i = 0; i < nr_index_hints; i++) {
-                struct SelvaFindIndexControlBlock *icb;
-                struct SelvaSet *set;
+                struct SelvaFindIndexControlBlock *icb = NULL;
+                struct SelvaSet *set = NULL;
 
                 ind_err = SelvaFind_AutoIndex(ctx, hierarchy, dir, dir_expr, nodeId, index_hints[i], &icb, &set);
                 ind_icb[i] = icb;

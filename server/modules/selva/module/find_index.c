@@ -579,8 +579,6 @@ int SelvaFind_AutoIndex(
     TO_STR(filter);
     filter_str;
 
-    *icb_out = NULL;
-
     if (!filter || filter_len == 0 || FIND_INDICES_MAX == 0) {
         return SELVA_EINVAL;
     }
