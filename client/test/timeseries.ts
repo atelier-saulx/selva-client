@@ -196,6 +196,12 @@ test.beforeEach(async (t) => {
           bolNo: { type: 'boolean' },
         },
       },
+      want: {
+        prefix: 'wa',
+        fields: {
+          intTimeseries: { type: 'int', timeseries: true },
+        },
+      },
     },
   })
 
@@ -205,12 +211,13 @@ test.beforeEach(async (t) => {
   await client.destroy()
 })
 
-test.after(async (t) => {
+test.after.always(async (t) => {
   const client = connect({ port })
   await client.delete('root')
   await client.destroy()
   await srv.destroy()
   await t.connectionsAreEmpty()
+  await wait(500)
 })
 
 // TODO: this will work once branch schema update valiation is merged: https://github.com/atelier-saulx/selva/blob/schema-update-validation/client/src/schema/types.ts#L10
@@ -484,6 +491,41 @@ test[
   }, 2e3)
 
   await wait(5000e3)
+
+  await client.delete('root')
+
+  await client.destroy()
+})
+
+test[
+  !(
+    fs.existsSync('/usr/lib/postgresql/12/bin/postgres') ||
+    fs.existsSync('/usr/local/Cellar/postgresql@12')
+  )
+    ? 'skip'
+    : 'serial'
+]('$increment on int', async (t) => {
+  // test.only('$increment on int', async (t) => {
+  const client = connect({ port })
+  const id = await client.set({
+    type: 'want',
+    intTimeseries: 0,
+  })
+
+  await client.set({
+    $id: id,
+    intTimeseries: { $increment: 1 },
+  })
+
+  t.is(
+    (
+      await client.get({
+        $id: id,
+        intTimeseries: true,
+      })
+    ).intTimeseries,
+    1
+  )
 
   await client.delete('root')
 
